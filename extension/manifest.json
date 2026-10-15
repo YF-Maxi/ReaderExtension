@@ -1,0 +1,28 @@
+{
+  "manifest_version": 2,
+  "name": "Reader TTS",
+  "version": "1.0.0",
+  "description": "Read selected text aloud with a natural local neural voice (Kokoro), with a player and live text highlighting.",
+  "icons": { "48": "icons/icon.svg", "96": "icons/icon.svg" },
+  "browser_specific_settings": {
+    "gecko": { "id": "reader-tts@local", "strict_min_version": "128.0" }
+  },
+  "permissions": [
+    "menus",
+    "activeTab",
+    "storage",
+    "nativeMessaging",
+    "http://127.0.0.1/*"
+  ],
+  "background": { "scripts": ["background.js"], "persistent": true },
+  "commands": {
+    "read-selection": {
+      "suggested_key": { "default": "Alt+Shift+R" },
+      "description": "Read the selected text (or the page) aloud"
+    }
+  },
+  "browser_action": {
+    "default_icon": "icons/icon.svg",
+    "default_title": "Read selection aloud (Alt+Shift+R)"
+  }
+}

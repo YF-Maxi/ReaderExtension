@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Reader</title>
+  <link rel="stylesheet" href="player.css">
+</head>
+<body>
+  <header>
+    <div id="title" title="">Reader</div>
+    <div id="status"><span id="status-dot"></span><span id="status-text">Starting…</span></div>
+  </header>
+
+  <main id="viewport" tabindex="-1">
+    <div id="track"></div>
+  </main>
+
+  <footer>
+    <div id="progress-row">
+      <input id="progress" type="range" min="0" max="0" value="0" aria-label="Sentence">
+      <span id="progress-label">0 / 0</span>
+    </div>
+
+    <div id="controls">
+      <button id="btn-prev" title="Previous sentence (←)" aria-label="Previous sentence">
+        <svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>
+      </button>
+      <button id="btn-back" title="Back 5 seconds (Shift+←)" aria-label="Back 5 seconds">
+        <svg viewBox="0 0 24 24"><path d="M12 5V2L7 6l5 4V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z"/><text x="12" y="16.5" text-anchor="middle">5</text></svg>
+      </button>
+      <button id="btn-play" class="primary" title="Play / pause (Space)" aria-label="Play">
+        <svg class="icon-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+        <svg class="icon-pause" viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg>
+      </button>
+      <button id="btn-fwd" title="Forward 5 seconds (Shift+→)" aria-label="Forward 5 seconds">
+        <svg viewBox="0 0 24 24"><path d="M12 5V2l5 4-5 4V7a6 6 0 1 0 6 6h2a8 8 0 1 1-8-8z"/><text x="12" y="16.5" text-anchor="middle">5</text></svg>
+      </button>
+      <button id="btn-next" title="Next sentence (→)" aria-label="Next sentence">
+        <svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>
+      </button>
+    </div>
+
+    <div id="settings">
+      <div class="speed" title="Reading speed ( - / + )">
+        <button id="btn-slower" aria-label="Slower">−</button>
+        <button id="speed-label" title="Reset to 1×">1.0×</button>
+        <button id="btn-faster" aria-label="Faster">+</button>
+      </div>
+      <select id="voice" title="Voice" aria-label="Voice"></select>
+      <div class="font" title="Text size">
+        <button id="btn-font-down" aria-label="Smaller text">A−</button>
+        <button id="btn-font-up" aria-label="Larger text">A+</button>
+      </div>
+    </div>
+  </footer>
+
+  <audio id="audio" preload="auto"></audio>
+  <script src="player.js"></script>
+</body>
+</html>

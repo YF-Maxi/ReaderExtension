@@ -1,0 +1,5 @@
+server/.venv/
+server/server.log
+.tools/
+dist/
+__pycache__/
