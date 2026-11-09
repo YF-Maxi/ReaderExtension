@@ -72,24 +72,26 @@ header {
   mask-image: linear-gradient(transparent 0, #000 18%, #000 82%, transparent 100%);
 }
 #track { padding: 45vh 22px; }
-.sentence {
+#track p {
   font-family: Georgia, "Iowan Old Style", "Source Serif 4", serif;
   font-size: var(--font-size);
-  line-height: 1.55;
-  padding: 6px 10px;
-  margin: 2px 0;
-  border-radius: 8px;
+  line-height: 1.6;
+  margin: 0 0 calc(var(--font-size) * .9);
+}
+.sentence {
+  padding: 2px 1px;
+  border-radius: 4px;
   cursor: pointer;
-  opacity: .28;
+  opacity: .4;
+  box-decoration-break: clone;
   transition: opacity .3s, background-color .3s;
 }
-.sentence.para { margin-top: calc(var(--font-size) * .9); }
-.sentence:hover { opacity: .6; }
-.sentence.near { opacity: .55; }
+.sentence:hover { opacity: .7; }
+.sentence.near { opacity: .65; }
 .sentence.current {
   opacity: 1;
   background: var(--current-bg);
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: 0 0 0 3px var(--current-bg);
 }
 .sentence.current.loading { animation: pulse .8s infinite alternate; }
 .word { border-radius: 3px; transition: background-color .08s; }
@@ -148,3 +150,58 @@ select {
   border-radius: 8px;
   padding: 0 8px;
 }
+
+header button {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  flex: none;
+}
+
+/* Pronunciation editor (replaces the text view while open) */
+body.dict-open #viewport { display: none; }
+#dict {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+}
+#dict[hidden] { display: none; }
+.dict-head { display: flex; align-items: baseline; gap: 10px; }
+#dict-path { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+#dict-close { border: none; width: 28px; height: 28px; }
+#dict-text {
+  flex: 1;
+  min-height: 100px;
+  resize: none;
+  font: 13px/1.5 ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", monospace;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.dict-actions { display: flex; align-items: center; gap: 10px; }
+.hint { flex: 1; color: var(--muted); font-size: 12px; }
+.hint code { font-size: 11px; }
+button.accent { background: var(--accent); color: var(--accent-text); border-color: var(--accent); height: 30px; padding: 0 16px; font-weight: 600; }
+#dict-msg { font-size: 12px; color: var(--muted); min-height: 1em; white-space: pre-line; }
+#dict-msg.ok { color: #2fb344; }
+#dict-msg.warn { color: #e8590c; }
+.dict-try { display: flex; gap: 8px; }
+#try-text {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+}
+#try-btn { height: 32px; padding: 0 12px; }
+#try-out { font-size: 12px; color: var(--muted); min-height: 2.8em; }
+#try-out .ph { font-family: ui-monospace, "DejaVu Sans Mono", monospace; color: var(--text); user-select: all; }

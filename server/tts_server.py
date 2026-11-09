@@ -6,12 +6,20 @@ available. The extension sends one sentence at a time; the server answers with
 a WAV clip plus per-word timestamps so the player can highlight words.
 
 Endpoints (all bound to 127.0.0.1):
-  GET  /health      -> {"ready": bool, "device": str, ...}
-  GET  /voices      -> [{"id", "name", "lang"}]
-  POST /synthesize  {"text", "voice", "speed"} -> {"audio": base64 wav, "duration", "words": [...]}
+  GET  /health          -> {"ready": bool, "device": str, ...}
+  GET  /voices          -> [{"id", "name", "lang"}]
+  POST /synthesize      {"text", "voice", "speed", "dictionary"?} -> {"audio": base64 wav, "duration", "words": [...]}
+  POST /phonemize       {"text", "voice", "dictionary"?} -> {"spoken", "phonemes"}
+  GET  /pronunciations  -> {"text", "path"}
+  PUT  /pronunciations  {"text"} -> {"entries", "warnings"}
+
+Before synthesis the text is rewritten for speech only (word timestamps are mapped
+back to the original text): entries from pronunciations.txt are substituted, and
+dots inside words like "app.exe" or "192.168.1.1" become " dot ".
 
 Environment:
   READER_TTS_PORT       port (default 5111)
+  READER_TTS_DICT       pronunciation file (default: pronunciations.txt in the project root)
   READER_TTS_DEVICE     "cuda" or "cpu" (default: cuda if available)
   READER_TTS_IDLE_EXIT  minutes of inactivity before the server exits and frees
                         the GPU (default 15, 0 = never). The extension restarts it
@@ -31,6 +39,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("READER_TTS_PORT", "5111"))
 IDLE_EXIT_MIN = float(os.environ.get("READER_TTS_IDLE_EXIT", "15"))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DICT_PATH = os.environ.get("READER_TTS_DICT") or os.path.join(ROOT, "pronunciations.txt")
 REPO = "hexgrad/Kokoro-82M"
 SAMPLE_RATE = 24000
 MAX_CHARS = 5000
@@ -132,19 +142,234 @@ class Engine:
                 offset += len(audio) / SAMPLE_RATE
                 chunks.append(audio)
         audio = np.concatenate(chunks) if chunks else np.zeros(SAMPLE_RATE // 10, dtype=np.float32)
-        return audio, align_words(text, words)
+        return audio, words
+
+    def phonemize(self, text, voice):
+        self.ready.wait()
+        if self.error:
+            raise RuntimeError(self.error)
+        with self.lock:
+            phonemes, _ = self.pipeline(voice[0]).g2p(text)
+        return phonemes
 
 
-def align_words(text, words):
-    """Map Kokoro's word tokens back to character offsets in the original text."""
+# ------------------------------------------------------------------ pronunciation
+
+# Phoneme symbols Kokoro's English voices understand (misaki's US + UK sets).
+PHONEMES = set("AIOQWYabdfhijklmnpstuvwzæðŋɑɒɔəɛɜɡɪɹɾʃʊʌʒʤʧˈˌːθᵊᵻʔ ")
+
+
+def is_phonemes(value):
+    return len(value) > 2 and value[0] == "/" and value[-1] == "/"
+
+
+SECTION = re.compile(r"(case_sensitive|case_insensitive)\s*:", re.IGNORECASE)
+
+
+class Entries:
+    """Pronunciations from the case_sensitive and case_insensitive sections."""
+
+    def __init__(self):
+        self.sensitive = {}    # exact word -> pronunciation
+        self.insensitive = {}  # lowercased word -> pronunciation
+
+    def __len__(self):
+        return len(self.sensitive) + len(self.insensitive)
+
+    def lookup(self, word):
+        # An exact-case entry beats a case-insensitive one for the same word.
+        return self.sensitive.get(word) or self.insensitive.get(word.lower())
+
+
+def parse_dictionary(text):
+    """'word=respelling' or 'word=/phonemes/' per line, under 'case_sensitive:' and
+    'case_insensitive:' headers (entries before any header are case-sensitive).
+    '#' starts a comment line."""
+    entries, warnings = Entries(), []
+    insensitive = False
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        header = SECTION.fullmatch(line)
+        if header:
+            insensitive = header.group(1).lower() == "case_insensitive"
+            continue
+        if "=" not in line:
+            warnings.append(f"Line {n}: missing '=' ({line[:40]})")
+            continue
+        key, value = (s.strip() for s in line.split("=", 1))
+        if not key or not value:
+            warnings.append(f"Line {n}: empty word or pronunciation")
+            continue
+        if is_phonemes(value):
+            bad = set(value[1:-1]) - PHONEMES
+            if bad:
+                warnings.append(f"Line {n}: unknown phoneme symbol(s) {' '.join(sorted(bad))} in {value}")
+                continue
+        elif any(c in value for c in "[]()"):
+            warnings.append(f"Line {n}: brackets aren't allowed in a respelling")
+            continue
+        target = entries.insensitive if insensitive else entries.sensitive
+        if insensitive:
+            key = key.lower()
+        if key in target:
+            warnings.append(f"Line {n}: '{key}' is defined twice, the last one wins")
+        target[key] = value
+    return entries, warnings
+
+
+def compile_dictionary(entries):
+    if not len(entries):
+        return None
+    words = [(k, False) for k in entries.sensitive] + [(k, True) for k in entries.insensitive]
+    # Longest match wins ("IoCs" before "IoC"); for equal length, exact case first.
+    words.sort(key=lambda w: (-len(w[0]), w[1]))
+    alts = [f"(?i:{re.escape(k)})" if ci else re.escape(k) for k, ci in words]
+    # Whole words only: no letter, digit or underscore directly before or after.
+    return re.compile(r"(?<!\w)(?:" + "|".join(alts) + r")(?!\w)")
+
+
+class Dictionary:
+    """pronunciations.txt, reloaded whenever the file changes."""
+
+    def __init__(self, path):
+        self.path = path
+        self.mtime = None
+        self.entries, self.regex = Entries(), None
+        self.lock = threading.Lock()
+
+    def current(self):
+        try:
+            mtime = os.path.getmtime(self.path)
+        except OSError:
+            mtime = 0.0
+        with self.lock:
+            if mtime != self.mtime:
+                self.entries, warnings = parse_dictionary(self.read())
+                self.regex = compile_dictionary(self.entries)
+                self.mtime = mtime
+                log(f"Loaded {len(self.entries)} pronunciation(s) from {self.path}")
+                for w in warnings:
+                    log("  " + w)
+            return self.entries, self.regex, self.mtime
+
+    def read(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def save(self, text):
+        entries, warnings = parse_dictionary(text)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text if text.endswith("\n") else text + "\n")
+        os.replace(tmp, self.path)
+        self.current()
+        return len(entries), warnings
+
+
+DICTIONARY = Dictionary(DICT_PATH)
+
+# Runs of letters/digits joined by dots without spaces: app.exe, 192.168.1.1, e.g, 3.14
+DOTTED = re.compile(r"[^\W_]+(?:\.[^\W_]+)+")
+
+
+# A lone "a"/"A" not followed by whitespace is the letter, not the article: a.bin, libfoo.a, (a), a-b
+LETTER_A = re.compile(r"(?<!\w)[aA](?![\w'’])(?!\s)")
+
+
+def initialisms(text):
+    """Spans like e.g, a.m, U.S.A (single letters joined by dots) that the voice already reads right."""
+    return [m.span() for m in DOTTED.finditer(text)
+            if all(len(p) == 1 and p.isalpha() for p in m.group().split("."))]
+
+
+def spoken_dots(text):
+    """Positions of dots to read as "dot" (not decimals like 3.14 or initialisms like e.g.)."""
+    positions = []
+    for m in DOTTED.finditer(text):
+        parts = m.group().split(".")
+        if all(len(p) == 1 and p.isalpha() for p in parts):
+            continue
+        if len(parts) == 2 and parts[0].isdigit() and parts[1][:1].isdigit():
+            continue
+        positions.extend(m.start() + i for i, ch in enumerate(m.group()) if ch == ".")
+    return positions
+
+
+def to_spoken(text, entries, regex):
+    """Rewrite text for speech. Returns (spoken, segments), where each segment is
+    (spoken_start, spoken_end, orig_start, orig_end, verbatim)."""
+    reps = []
+    if regex:
+        for m in regex.finditer(text):
+            value = entries.lookup(m.group())
+            if not value:
+                continue
+            if is_phonemes(value):
+                # Kokoro's own syntax for exact pronunciations: [word](/phonemes/)
+                label = re.sub(r"[\[\]()]", "", m.group()) or "x"
+                value = f"[{label}]({value})"
+            reps.append((m.start(), m.end(), value))
+    for p in spoken_dots(text):
+        if not any(s <= p < e for s, e, _ in reps):
+            reps.append((p, p + 1, " dot "))
+    skip = initialisms(text)
+    for m in LETTER_A.finditer(text):
+        p = m.start()
+        if not any(s <= p < e for s, e, _ in reps) and not any(s <= p < e for s, e in skip):
+            reps.append((p, p + 1, f"[{m.group()}](/ˈA/)"))
+    reps.sort()
+
+    spoken, segs, cur, pos = [], [], 0, 0
+    for s, e, value in reps:
+        if s > cur:
+            segs.append((pos, pos + s - cur, cur, s, True))
+            spoken.append(text[cur:s])
+            pos += s - cur
+        segs.append((pos, pos + len(value), s, e, False))
+        spoken.append(value)
+        pos += len(value)
+        cur = e
+    if cur < len(text):
+        segs.append((pos, pos + len(text) - cur, cur, len(text), True))
+        spoken.append(text[cur:])
+    return "".join(spoken), segs
+
+
+def align_words(spoken, segs, words):
+    """Map Kokoro's word tokens (found in the spoken text) back to character
+    offsets in the original text. Words spoken for a substitution highlight the
+    whole original word."""
     out, cursor = [], 0
     for word, start, end in words:
-        idx = text.find(word, cursor)
+        idx = spoken.find(word, cursor)
         if idx < 0 or idx - cursor > 60:
             continue
-        out.append({"start": round(start, 3), "end": round(end, 3), "cs": idx, "ce": idx + len(word)})
-        cursor = idx + len(word)
+        a = next(s for s in segs if s[0] <= idx < s[1])
+        b = next(s for s in segs if s[0] <= idx + len(word) - 1 < s[1])
+        cs = a[2] + (idx - a[0]) if a[4] else a[2]
+        ce = b[2] + (idx + len(word) - b[0]) if b[4] else b[3]
+        # Skip the rest of a substitution so later words can't match inside it.
+        cursor = idx + len(word) if b[4] else b[1]
+        if out and out[-1]["cs"] == cs and out[-1]["ce"] == ce:
+            out[-1]["end"] = round(end, 3)  # several spoken words for one written word
+            continue
+        out.append({"start": round(start, 3), "end": round(end, 3), "cs": cs, "ce": ce})
     return out
+
+
+def prepare_text(text, dictionary_text=None):
+    if dictionary_text is None:
+        entries, regex, version = DICTIONARY.current()
+    else:  # unsaved dictionary from the editor's "Try" box
+        entries, _ = parse_dictionary(dictionary_text)
+        regex, version = compile_dictionary(entries), None
+    spoken, segs = to_spoken(text, entries, regex)
+    return spoken, segs, version
 
 
 def to_wav(audio):
@@ -193,27 +418,47 @@ class Handler(BaseHTTPRequestHandler):
             })
         if self.path == "/voices":
             return self._send(200, [{"id": v, "name": n, "lang": LANG_NAMES[v[0]]} for v, n in VOICES])
+        if self.path == "/pronunciations":
+            return self._send(200, {"text": DICTIONARY.read(), "path": DICTIONARY.path})
         self._send(404, {"error": "not found"})
+
+    def _json_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(length) or b"{}")
+
+    def do_PUT(self):
+        if not self._origin_ok():
+            return self._send(403, {"error": "forbidden origin"})
+        if self.path != "/pronunciations":
+            return self._send(404, {"error": "not found"})
+        try:
+            count, warnings = DICTIONARY.save(str(self._json_body().get("text", "")))
+            self._send(200, {"entries": count, "warnings": warnings, "path": DICTIONARY.path})
+        except Exception as e:
+            self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
     def do_POST(self):
         global LAST_USED
         if not self._origin_ok():
             return self._send(403, {"error": "forbidden origin"})
-        if self.path != "/synthesize":
+        if self.path not in ("/synthesize", "/phonemize"):
             return self._send(404, {"error": "not found"})
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            req = json.loads(self.rfile.read(length) or b"{}")
+            req = self._json_body()
             text = str(req.get("text", "")).strip()[:MAX_CHARS]
             voice = req.get("voice") or "af_heart"
             speed = min(max(float(req.get("speed", 1.0)), 0.5), 2.0)
+            dictionary = req.get("dictionary")
             if voice not in VOICE_IDS:
                 return self._send(400, {"error": f"unknown voice {voice}"})
             if not text:
                 return self._send(400, {"error": "empty text"})
             LAST_USED = time.time()
+            spoken, segs, version = prepare_text(text, dictionary if isinstance(dictionary, str) else None)
+            if self.path == "/phonemize":
+                return self._send(200, {"spoken": spoken, "phonemes": ENGINE.phonemize(spoken, voice)})
             t0 = time.time()
-            audio, words = ENGINE.synthesize(text, voice, speed)
+            audio, words = ENGINE.synthesize(spoken, voice, speed)
             wav = to_wav(audio)
             LAST_USED = time.time()
             duration = len(audio) / SAMPLE_RATE
@@ -221,7 +466,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {
                 "audio": base64.b64encode(wav).decode(),
                 "duration": duration,
-                "words": words,
+                "words": align_words(spoken, segs, words),
+                "dict_version": version,
             })
         except Exception as e:
             log("Synthesis error:", repr(e))

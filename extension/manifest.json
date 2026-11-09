@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Reader TTS",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Read selected text aloud with a natural local neural voice (Kokoro), with a player and live text highlighting.",
   "icons": { "48": "icons/icon.svg", "96": "icons/icon.svg" },
   "browser_specific_settings": {

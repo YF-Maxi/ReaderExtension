@@ -26,6 +26,7 @@ const state = {
   voice: "af_heart",
   fontSize: 20,
   okStatus: "",
+  dictVersion: null, // pronunciations.txt version the cached clips were made with
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -78,9 +79,9 @@ function prepare(text) {
 
 // ---------------------------------------------------------------- server
 
-async function api(path, body) {
+async function api(path, body, method = "POST") {
   const res = await fetch(SERVER + path, body
-    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+    ? { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
     : {});
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || res.statusText);
@@ -145,31 +146,37 @@ async function loadVoices() {
   voicesLoaded = true;
 }
 
-async function fetchClip(text, voice) {
+async function fetchClipWith(body) {
   await ensureServer();
   let data;
   try {
-    data = await api("/synthesize", { text, voice });
+    data = await api("/synthesize", body);
   } catch (e) {
     if (!(e instanceof TypeError)) throw e;
     // Network error: the server probably exited after idling. Restart and retry once.
     serverPromise = null;
     await ensureServer();
-    data = await api("/synthesize", { text, voice });
+    data = await api("/synthesize", body);
   }
   const bin = atob(data.audio);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
-  return { url, duration: data.duration, words: data.words };
+  return { url, duration: data.duration, words: data.words, dictVersion: data.dict_version };
 }
+
+const fetchClip = (text, voice) => fetchClipWith({ text, voice });
 
 function getClip(i) {
   let p = state.clips.get(i);
   if (!p) {
     const clips = state.clips;
     p = fetchClip(state.sentences[i].text, state.voice);
-    p.catch(() => { if (clips.get(i) === p) clips.delete(i); });
+    p.then((clip) => {
+      // pronunciations.txt changed since the other cached clips were made: re-synthesize them.
+      if (state.dictVersion !== null && clip.dictVersion > state.dictVersion) dropClips(i);
+      if (state.dictVersion === null || clip.dictVersion > state.dictVersion) state.dictVersion = clip.dictVersion;
+    }, () => { if (clips.get(i) === p) clips.delete(i); });
     clips.set(i, p);
   }
   return p;
@@ -194,6 +201,15 @@ function pruneClips() {
   }
 }
 
+// Forget cached clips except sentence `keep` (and the one playing), so they're re-synthesized.
+function dropClips(keep = -1) {
+  for (const [i, p] of state.clips) {
+    if (i === keep || i === state.loadedIdx) continue;
+    state.clips.delete(i);
+    freeClip(p);
+  }
+}
+
 function clearClips() {
   for (const p of state.clips.values()) freeClip(p);
   state.clips = new Map();
@@ -203,12 +219,19 @@ function clearClips() {
 
 function renderTrack() {
   track.textContent = "";
+  let para = null;
   state.els = state.sentences.map((s, i) => {
-    const el = document.createElement("div");
-    el.className = "sentence" + (s.para ? " para" : "");
+    if (!para || s.para) {
+      para = document.createElement("p");
+      track.append(para);
+    } else {
+      para.append(" ");
+    }
+    const el = document.createElement("span");
+    el.className = "sentence";
     el.textContent = s.text;
     el.dataset.i = i;
-    track.append(el);
+    para.append(el);
     return el;
   });
   $("progress").max = Math.max(0, state.sentences.length - 1);
@@ -275,7 +298,9 @@ function scrollToCurrent(force = false) {
   if (!force && Date.now() < state.userScrollUntil) return;
   const el = state.els[state.idx];
   if (!el) return;
-  const top = el.offsetTop + el.offsetHeight / 2 - viewport.clientHeight / 2;
+  const r = el.getBoundingClientRect();
+  const v = viewport.getBoundingClientRect();
+  const top = viewport.scrollTop + r.top - v.top + r.height / 2 - viewport.clientHeight / 2;
   viewport.scrollTo({ top, behavior: "smooth" });
 }
 
@@ -288,11 +313,14 @@ function updateProgress() {
 // ---------------------------------------------------------------- playback
 
 function setPlaying(v) {
+  const was = state.playing;
   state.playing = v;
   document.body.classList.toggle("playing", v);
   $("btn-play").setAttribute("aria-label", v ? "Pause" : "Play");
-  if (v) requestAnimationFrame(tick);
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = v ? "playing" : "paused";
+  if (v && !was) requestAnimationFrame(tick);
 }
+
 
 function tick() {
   highlightWord();
@@ -424,6 +452,9 @@ function load(payload) {
   $("title").textContent = title;
   $("title").title = payload.url || title;
   document.title = `Reader — ${title}`;
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title, artist: "Reader TTS" });
+  }
   state.sentences = prepare(payload.text || "");
   state.idx = 0;
   state.loadedIdx = -1;
@@ -435,6 +466,116 @@ function load(payload) {
   go(0);
 }
 
+// ---------------------------------------------------------------- pronunciation editor
+
+const dictText = $("dict-text");
+const tryAudio = new Audio();
+let dictSaved = "";     // file contents as last loaded/saved
+let discardArmed = false;
+
+const dictOpen = () => !$("dict").hidden;
+
+function dictMsg(kind, text) {
+  $("dict-msg").className = kind;
+  $("dict-msg").textContent = text;
+}
+
+async function openDict() {
+  $("dict").hidden = false;
+  document.body.classList.add("dict-open");
+  discardArmed = false;
+  dictMsg("", "Loading…");
+  try {
+    await ensureServer();
+    const data = await api("/pronunciations");
+    dictSaved = data.text;
+    dictText.value = data.text;
+    // LRM marks keep the path's order intact; the CSS truncates it from the left.
+    $("dict-path").textContent = `\u200E${data.path}\u200E`;
+    $("dict-path").title = data.path;
+    dictMsg("", "");
+  } catch (e) {
+    dictMsg("warn", `Couldn't load the dictionary: ${e.message}`);
+  }
+  dictText.focus();
+}
+
+function closeDict(force = false) {
+  if (!force && dictText.value !== dictSaved && !discardArmed) {
+    discardArmed = true;
+    dictMsg("warn", "Unsaved changes. Save them, or close again to discard.");
+    return;
+  }
+  tryAudio.pause();
+  $("dict").hidden = true;
+  document.body.classList.remove("dict-open");
+  requestAnimationFrame(() => scrollToCurrent(true));
+}
+
+async function saveDict() {
+  try {
+    const r = await api("/pronunciations", { text: dictText.value }, "PUT");
+    dictSaved = dictText.value;
+    discardArmed = false;
+    const summary = `Saved ${r.entries} pronunciation${r.entries === 1 ? "" : "s"}.`;
+    if (r.warnings.length) dictMsg("warn", `${summary} Skipped:\n${r.warnings.join("\n")}`);
+    else dictMsg("ok", `${summary} Applies from the next sentence.`);
+    // Re-synthesize everything except the sentence playing right now.
+    dropClips();
+    state.dictVersion = null;
+    if (state.sentences.length) prefetch(state.idx);
+  } catch (e) {
+    dictMsg("warn", `Save failed: ${e.message}`);
+  }
+}
+
+async function tryPronunciation() {
+  const text = $("try-text").value.trim();
+  if (!text) return;
+  const out = $("try-out");
+  out.textContent = "Generating…";
+  if (state.playing) togglePlay();
+  try {
+    // Uses the editor's current (possibly unsaved) entries.
+    const body = { text, voice: state.voice, dictionary: dictText.value };
+    const [clip, ph] = await Promise.all([fetchClipWith(body), api("/phonemize", body)]);
+    out.textContent = "";
+    const line1 = document.createElement("div");
+    line1.textContent = `Spoken as: ${ph.spoken}`;
+    const line2 = document.createElement("div");
+    line2.append("Phonemes: ");
+    const code = document.createElement("span");
+    code.className = "ph";
+    code.textContent = `/${ph.phonemes}/`;
+    line2.append(code);
+    out.append(line1, line2);
+    if (tryAudio.src) URL.revokeObjectURL(tryAudio.src);
+    tryAudio.src = clip.url;
+    tryAudio.playbackRate = state.rate;
+    tryAudio.play();
+  } catch (e) {
+    out.textContent = `Failed: ${e.message}`;
+  }
+}
+
+$("btn-dict").addEventListener("click", () => (dictOpen() ? closeDict() : openDict()));
+$("dict-close").addEventListener("click", () => closeDict());
+$("dict-save").addEventListener("click", saveDict);
+$("try-btn").addEventListener("click", tryPronunciation);
+dictText.addEventListener("input", () => { discardArmed = false; });
+$("dict").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeDict();
+  } else if (e.key === "s" && e.ctrlKey) {
+    e.preventDefault();
+    saveDict();
+  } else if (e.key === "Enter" && e.target.id === "try-text") {
+    e.preventDefault();
+    tryPronunciation();
+  }
+});
+
 // ---------------------------------------------------------------- events
 
 audio.addEventListener("ended", () => {
@@ -442,6 +583,36 @@ audio.addEventListener("ended", () => {
   else setPlaying(false);
 });
 audio.addEventListener("seeked", highlightWord);
+
+// Media keys, the desktop media widget and Firefox's own controls act on the <audio>
+// element directly; mirror that in the player state.
+audio.addEventListener("pause", () => {
+  // Ignore our own pauses while switching sentences (loadedIdx is -1 until the next clip is in).
+  if (state.loadedIdx !== state.idx || audio.ended) return;
+  if (state.playing) setPlaying(false);
+});
+audio.addEventListener("play", () => {
+  if (!state.playing) setPlaying(true);
+});
+
+if ("mediaSession" in navigator) {
+  const actions = {
+    play: () => { if (!state.playing) togglePlay(); },
+    pause: () => { if (state.playing) togglePlay(); },
+    stop: () => { if (state.playing) togglePlay(); },
+    previoustrack: prev,
+    nexttrack: next,
+    seekbackward: () => seekBy(-5),
+    seekforward: () => seekBy(5),
+  };
+  for (const [action, handler] of Object.entries(actions)) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch (e) {
+      // action not supported by this Firefox version
+    }
+  }
+}
 
 $("btn-play").addEventListener("click", togglePlay);
 $("btn-prev").addEventListener("click", prev);
@@ -488,7 +659,8 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "SELECT" || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (/^(SELECT|INPUT|TEXTAREA)$/.test(e.target.tagName) || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (dictOpen()) return;
   const handlers = {
     " ": togglePlay,
     k: togglePlay,

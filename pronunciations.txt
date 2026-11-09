@@ -1,0 +1,27 @@
+# Pronunciation dictionary for Reader TTS.
+# One entry per line:   word=how to say it
+#   - Matches whole words only ("SOC" doesn't change "SOCKET").
+#   - Respell it with normal words:     VLAN=vee-lan
+#   - Or give exact phonemes in slashes: SOC=/sˈɑk/   (see README "Exact phonetic spellings")
+#   - Entries under case_sensitive: match only that exact spelling ("IoCs", not "iocs").
+#     Entries under case_insensitive: match any capitalization ("json" also catches "JSON", "Json").
+#     If a word is in both sections, the exact-case entry wins.
+# The text shown in the player is never changed, only what is spoken.
+# Edit here or in the player window (the "Pronunciations" button). Changes apply without restarting.
+
+case_sensitive:
+SOC=/sˈɑk/
+IoCs=eye-oh-seez
+IoC=eye-oh-see
+VLAN=vee-lan
+SIEM=see-em
+ATT&CK=attack
+
+case_insensitive:
+json=j-son
+esc=escape
+ifconfig=IF-config
+PCAP=p-cap
+LibPCAP=lib p-cap
+flow_id=flow ID
+af_packet=A-F packet

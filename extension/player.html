@@ -9,11 +9,31 @@
   <header>
     <div id="title" title="">Reader</div>
     <div id="status"><span id="status-dot"></span><span id="status-text">Starting…</span></div>
+    <button id="btn-dict" title="Pronunciation dictionary">Pronunciations</button>
   </header>
 
   <main id="viewport" tabindex="-1">
     <div id="track"></div>
   </main>
+
+  <section id="dict" hidden>
+    <div class="dict-head">
+      <strong>Pronunciations</strong>
+      <span id="dict-path"></span>
+      <button id="dict-close" title="Close (Esc)" aria-label="Close">✕</button>
+    </div>
+    <textarea id="dict-text" spellcheck="false" placeholder="case_sensitive:&#10;SOC=sock&#10;IoCs=/ˌIˌOsˈiz/&#10;&#10;case_insensitive:&#10;json=j-son"></textarea>
+    <div class="dict-actions">
+      <span class="hint"><code>word=respelling</code> · <code>word=/phonemes/</code> · <code># comment</code><br>under <code>case_sensitive:</code> or <code>case_insensitive:</code></span>
+      <button id="dict-save" class="accent" title="Save (Ctrl+S)">Save</button>
+    </div>
+    <div id="dict-msg"></div>
+    <div class="dict-try">
+      <input id="try-text" placeholder="Try it: type a word or sentence, press Enter">
+      <button id="try-btn">▶ Try</button>
+    </div>
+    <div id="try-out"></div>
+  </section>
 
   <footer>
     <div id="progress-row">
