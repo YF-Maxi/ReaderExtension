@@ -9,6 +9,20 @@ const $ = (id) => document.getElementById(id);
 const audio = $("audio");
 const viewport = $("viewport");
 const track = $("track");
+const DEFAULT_PREFERENCES = {
+  readerHighlight: true,
+  readerScroll: true,
+  pageHighlight: true,
+  pageScroll: false,
+  autoplay: true,
+};
+const PREFERENCE_INPUTS = {
+  readerHighlight: "pref-reader-highlight",
+  readerScroll: "pref-reader-scroll",
+  pageHighlight: "pref-page-highlight",
+  pageScroll: "pref-page-scroll",
+  autoplay: "pref-autoplay",
+};
 
 const state = {
   sentences: [],     // [{text, para}]
@@ -27,6 +41,11 @@ const state = {
   fontSize: 20,
   okStatus: "",
   dictVersion: null, // pronunciations.txt version the cached clips were made with
+  preferences: { ...DEFAULT_PREFERENCES },
+  source: null,
+  sourceAvailable: false,
+  sourceUpdate: 0,
+  menu: null,
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -60,16 +79,37 @@ function splitLong(s) {
 function prepare(text) {
   const segmenter = new Intl.Segmenter("en", { granularity: "sentence" });
   const out = [];
-  text = text
-    .replace(/\r/g, "")
-    .replace(/\[(?:\d+(?:[–,-]\d+)*|[a-z]|citation needed|note \d+)\]/gi, ""); // Wikipedia-style refs
-  for (const line of text.split(/\n+/)) {
-    const clean = line.replace(/\s+/g, " ").trim();
+  // Keep a UTF-16 source offset for every retained character. Word timestamps refer
+  // to the cleaned text; page ranges must still refer to the original DOM text.
+  const offsets = [];
+  let stripped = "", cursor = 0;
+  const ignored = /\r|\[(?:\d+(?:[–,-]\d+)*|[a-z]|citation needed|note \d+)\]/gi;
+  for (const m of text.matchAll(ignored)) {
+    while (cursor < m.index) { offsets.push(cursor); stripped += text[cursor++]; }
+    cursor += m[0].length;
+  }
+  while (cursor < text.length) { offsets.push(cursor); stripped += text[cursor++]; }
+  for (const line of stripped.matchAll(/[^\n]+/g)) {
+    let clean = "";
+    const sourceOffsets = [];
+    for (const m of line[0].matchAll(/\s+|\S+/g)) {
+      if (/^\s/.test(m[0])) {
+        if (clean) { clean += " "; sourceOffsets.push(offsets[line.index + m.index]); }
+      } else {
+        clean += m[0];
+        for (let j = 0; j < m[0].length; j++) sourceOffsets.push(offsets[line.index + m.index + j]);
+      }
+    }
+    if (clean.endsWith(" ")) { clean = clean.slice(0, -1); sourceOffsets.pop(); }
     let first = true;
-    for (const { segment } of segmenter.segment(clean)) {
+    for (const { segment, index } of segmenter.segment(clean)) {
+      let pieceCursor = 0;
       for (const piece of splitLong(segment.trim())) {
         if (!/[\p{L}\p{N}]/u.test(piece)) continue;
-        out.push({ text: piece, para: first && out.length > 0 });
+        const start = segment.indexOf(piece, pieceCursor);
+        pieceCursor = start + piece.length;
+        out.push({ text: piece, para: first && out.length > 0,
+          sourceOffsets: sourceOffsets.slice(index + start, index + start + piece.length) });
         first = false;
       }
     }
@@ -143,6 +183,7 @@ async function loadVoices() {
   for (const v of voices) select.append(new Option(v.name, v.id));
   if (!voices.some((v) => v.id === state.voice)) state.voice = voices[0].id;
   select.value = state.voice;
+  updatePlaybackSummary();
   voicesLoaded = true;
 }
 
@@ -162,7 +203,11 @@ async function fetchClipWith(body) {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const url = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
-  return { url, duration: data.duration, words: data.words, dictVersion: data.dict_version };
+  // Python reports Unicode code-point offsets; DOM ranges and JS slices use UTF-16.
+  const utf16 = [0];
+  for (const char of body.text) utf16.push(utf16[utf16.length - 1] + char.length);
+  const words = data.words.map((w) => ({ ...w, cs: utf16[w.cs], ce: utf16[w.ce] }));
+  return { url, duration: data.duration, words, dictVersion: data.dict_version };
 }
 
 const fetchClip = (text, voice) => fetchClipWith({ text, voice });
@@ -239,6 +284,7 @@ function renderTrack() {
 
 let marked = [];
 function renderCurrent() {
+  updateSource(null);
   for (const el of marked) {
     el.classList.remove("current", "near", "loading");
     if (el.dataset.words) {
@@ -267,7 +313,7 @@ function renderWords(i, words) {
   state.words = [];
   let cursor = 0;
   for (const w of words) {
-    if (w.cs < cursor || w.ce > text.length) continue;
+    if (!Number.isInteger(w.cs) || !Number.isInteger(w.ce) || w.cs < cursor || w.ce <= w.cs || w.ce > text.length) continue;
     if (w.cs > cursor) el.append(text.slice(cursor, w.cs));
     const span = document.createElement("span");
     span.className = "word";
@@ -281,27 +327,70 @@ function renderWords(i, words) {
   state.lastWord = -1;
 }
 
-function highlightWord() {
+function highlightWord(force = false) {
   if (state.loadedIdx !== state.idx || !state.wordEls.length) return;
   const t = audio.currentTime + 0.02;
   let k = -1;
   for (let j = 0; j < state.words.length && state.words[j].start <= t; j++) k = j;
-  if (k === state.lastWord) return;
+  if (k === state.lastWord && !force) return;
   state.wordEls.forEach((el, j) => {
     el.classList.toggle("active", j === k);
     el.classList.toggle("spoken", j < k);
   });
   state.lastWord = k;
+  updateSource(k >= 0 ? state.words[k] : null);
 }
 
 function scrollToCurrent(force = false) {
+  if (!state.preferences.readerScroll || state.menu) return;
   if (!force && Date.now() < state.userScrollUntil) return;
   const el = state.els[state.idx];
   if (!el) return;
   const r = el.getBoundingClientRect();
   const v = viewport.getBoundingClientRect();
   const top = viewport.scrollTop + r.top - v.top + r.height / 2 - viewport.clientHeight / 2;
-  viewport.scrollTo({ top, behavior: "smooth" });
+  viewport.scrollTo({ top, behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+}
+
+function updateSource(word) {
+  const source = state.source;
+  if (!source || !state.sourceAvailable) return;
+  const offsets = state.sentences[state.idx]?.sourceOffsets;
+  const start = word ? offsets?.[word.cs] : null;
+  const end = word ? offsets?.[word.ce - 1] + 1 : null;
+  const update = ++state.sourceUpdate;
+  browser.tabs.sendMessage(source.tabId, {
+    type: "source-update", sessionId: source.sessionId,
+    start: Number.isFinite(start) ? start : null, end,
+    highlight: state.preferences.pageHighlight, autoScroll: state.preferences.pageScroll,
+  }).then((available) => {
+    if (state.source !== source || update !== state.sourceUpdate) return;
+    if (available !== true) { state.sourceAvailable = false; updateSourceNote(); }
+  }).catch(() => {
+    if (state.source !== source || update !== state.sourceUpdate) return;
+    state.sourceAvailable = false;
+    updateSourceNote();
+  });
+}
+
+function updateSourceNote() {
+  $("source-note").textContent = state.sourceAvailable
+    ? "Connected to the page you started reading."
+    : "Page tracking is unavailable. Start reading again from a normal web page to reconnect. Text fields and protected browser pages cannot be highlighted.";
+}
+
+function applyPreferences() {
+  for (const [key, id] of Object.entries(PREFERENCE_INPUTS)) $(id).checked = state.preferences[key];
+  document.body.classList.toggle("no-reader-highlight", !state.preferences.readerHighlight);
+  document.body.classList.toggle("no-reader-scroll", !state.preferences.readerScroll);
+  highlightWord(true);
+  if (!state.words.length) updateSource(null);
+  scrollToCurrent();
+}
+
+function updatePlaybackSummary() {
+  const voice = $("voice").selectedOptions[0]?.textContent.replace(/ · loading voices…$/, "") || state.voice;
+  $("playback-summary").textContent = `${state.rate.toFixed(1)}× · ${voice}`;
 }
 
 function updateProgress() {
@@ -426,11 +515,13 @@ function setRate(r) {
   audio.defaultPlaybackRate = state.rate;
   audio.playbackRate = state.rate;
   $("speed-label").textContent = `${state.rate.toFixed(1)}×`;
+  updatePlaybackSummary();
   browser.storage.local.set({ rate: state.rate });
 }
 
 function setVoice(v) {
   state.voice = v;
+  updatePlaybackSummary();
   browser.storage.local.set({ voice: v });
   clearClips();
   if (state.sentences.length) go(state.idx);
@@ -439,6 +530,7 @@ function setVoice(v) {
 function setFontSize(px) {
   state.fontSize = Math.min(36, Math.max(13, px));
   document.documentElement.style.setProperty("--font-size", `${state.fontSize}px`);
+  $("font-label").textContent = `${state.fontSize} px`;
   browser.storage.local.set({ fontSize: state.fontSize });
   requestAnimationFrame(() => scrollToCurrent(true));
 }
@@ -447,7 +539,11 @@ function load(payload) {
   state.token++;
   audio.pause();
   audio.removeAttribute("src");
+  setPlaying(false);
   clearClips();
+  state.source = payload.source || null;
+  state.sourceAvailable = !!state.source;
+  updateSourceNote();
   const title = payload.title || "Reader";
   $("title").textContent = title;
   $("title").title = payload.url || title;
@@ -462,7 +558,7 @@ function load(payload) {
   renderTrack();
   viewport.scrollTop = 0;
   if (!state.sentences.length) return;
-  setPlaying(true);
+  setPlaying(state.preferences.autoplay && !state.menu);
   go(0);
 }
 
@@ -472,8 +568,33 @@ const dictText = $("dict-text");
 const tryAudio = new Audio();
 let dictSaved = "";     // file contents as last loaded/saved
 let discardArmed = false;
+let dictRequest = 0;
+let tryRequest = 0;
 
 const dictOpen = () => !$("dict").hidden;
+
+function showMenu(menu) {
+  if (state.playing) togglePlay();
+  state.menu = menu;
+  $("dict").hidden = menu !== "dict";
+  $("preferences").hidden = menu !== "settings";
+  document.body.classList.toggle("menu-open", !!menu);
+  $("btn-dict").setAttribute("aria-expanded", String(menu === "dict"));
+  $("btn-settings").setAttribute("aria-expanded", String(menu === "settings"));
+}
+
+function openSettings() {
+  if (dictOpen() && !closeDict()) return;
+  showMenu("settings");
+  updateSourceNote();
+  $("settings-close").focus();
+}
+
+function closeSettings() {
+  showMenu(null);
+  viewport.focus();
+  requestAnimationFrame(() => scrollToCurrent(true));
+}
 
 function dictMsg(kind, text) {
   $("dict-msg").className = kind;
@@ -481,57 +602,75 @@ function dictMsg(kind, text) {
 }
 
 async function openDict() {
-  $("dict").hidden = false;
-  document.body.classList.add("dict-open");
+  showMenu("dict");
+  const request = ++dictRequest;
+  dictText.disabled = $("dict-save").disabled = $("try-btn").disabled = true;
+  $("dict-close").focus();
   discardArmed = false;
   dictMsg("", "Loading…");
   try {
     await ensureServer();
     const data = await api("/pronunciations");
+    if (request !== dictRequest) return;
     dictSaved = data.text;
     dictText.value = data.text;
     // LRM marks keep the path's order intact; the CSS truncates it from the left.
     $("dict-path").textContent = `\u200E${data.path}\u200E`;
     $("dict-path").title = data.path;
     dictMsg("", "");
+    dictText.disabled = $("dict-save").disabled = $("try-btn").disabled = false;
+    dictText.focus();
   } catch (e) {
+    if (request !== dictRequest) return;
     dictMsg("warn", `Couldn't load the dictionary: ${e.message}`);
   }
-  dictText.focus();
 }
 
 function closeDict(force = false) {
-  if (!force && dictText.value !== dictSaved && !discardArmed) {
+  if (!force && !dictText.disabled && dictText.value !== dictSaved && !discardArmed) {
     discardArmed = true;
     dictMsg("warn", "Unsaved changes. Save them, or close again to discard.");
-    return;
+    return false;
   }
+  dictRequest++;
+  tryRequest++;
   tryAudio.pause();
-  $("dict").hidden = true;
-  document.body.classList.remove("dict-open");
+  if (tryAudio.src) URL.revokeObjectURL(tryAudio.src);
+  tryAudio.removeAttribute("src");
+  showMenu(null);
+  viewport.focus();
   requestAnimationFrame(() => scrollToCurrent(true));
+  return true;
 }
 
 async function saveDict() {
+  if (dictText.disabled) return;
+  const text = dictText.value;
+  const request = dictRequest;
   try {
-    const r = await api("/pronunciations", { text: dictText.value }, "PUT");
-    dictSaved = dictText.value;
+    const r = await api("/pronunciations", { text }, "PUT");
+    // Invalidate clips even if the user left the menu while saving.
+    dropClips();
+    state.dictVersion = null;
+    if (state.sentences.length) prefetch(state.idx);
+    if (request !== dictRequest) return;
+    dictSaved = text;
     discardArmed = false;
     const summary = `Saved ${r.entries} pronunciation${r.entries === 1 ? "" : "s"}.`;
     if (r.warnings.length) dictMsg("warn", `${summary} Skipped:\n${r.warnings.join("\n")}`);
     else dictMsg("ok", `${summary} Applies from the next sentence.`);
-    // Re-synthesize everything except the sentence playing right now.
-    dropClips();
-    state.dictVersion = null;
-    if (state.sentences.length) prefetch(state.idx);
   } catch (e) {
+    if (request !== dictRequest) return;
     dictMsg("warn", `Save failed: ${e.message}`);
   }
 }
 
 async function tryPronunciation() {
+  if (dictText.disabled) return;
   const text = $("try-text").value.trim();
   if (!text) return;
+  const request = ++tryRequest;
+  tryAudio.pause();
   const out = $("try-out");
   out.textContent = "Generating…";
   if (state.playing) togglePlay();
@@ -539,6 +678,7 @@ async function tryPronunciation() {
     // Uses the editor's current (possibly unsaved) entries.
     const body = { text, voice: state.voice, dictionary: dictText.value };
     const [clip, ph] = await Promise.all([fetchClipWith(body), api("/phonemize", body)]);
+    if (request !== tryRequest || !dictOpen()) { URL.revokeObjectURL(clip.url); return; }
     out.textContent = "";
     const line1 = document.createElement("div");
     line1.textContent = `Spoken as: ${ph.spoken}`;
@@ -552,22 +692,30 @@ async function tryPronunciation() {
     if (tryAudio.src) URL.revokeObjectURL(tryAudio.src);
     tryAudio.src = clip.url;
     tryAudio.playbackRate = state.rate;
-    tryAudio.play();
+    await tryAudio.play();
   } catch (e) {
+    if (request !== tryRequest || !dictOpen()) return;
     out.textContent = `Failed: ${e.message}`;
   }
 }
 
 $("btn-dict").addEventListener("click", () => (dictOpen() ? closeDict() : openDict()));
 $("dict-close").addEventListener("click", () => closeDict());
+$("btn-settings").addEventListener("click", () => state.menu === "settings" ? closeSettings() : openSettings());
+$("btn-playback-settings").addEventListener("click", openSettings);
+$("settings-close").addEventListener("click", closeSettings);
+for (const [key, id] of Object.entries(PREFERENCE_INPUTS)) {
+  $(id).addEventListener("change", (e) => {
+    state.preferences[key] = e.target.checked;
+    browser.storage.local.set({ preferences: state.preferences });
+    applyPreferences();
+  });
+}
 $("dict-save").addEventListener("click", saveDict);
 $("try-btn").addEventListener("click", tryPronunciation);
 dictText.addEventListener("input", () => { discardArmed = false; });
 $("dict").addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    closeDict();
-  } else if (e.key === "s" && e.ctrlKey) {
+  if (e.key === "s" && e.ctrlKey) {
     e.preventDefault();
     saveDict();
   } else if (e.key === "Enter" && e.target.id === "try-text") {
@@ -582,7 +730,9 @@ audio.addEventListener("ended", () => {
   if (state.idx + 1 < state.sentences.length) go(state.idx + 1);
   else setPlaying(false);
 });
-audio.addEventListener("seeked", highlightWord);
+audio.addEventListener("seeked", () => highlightWord());
+// timeupdate also fires when animation frames are throttled in a hidden player.
+audio.addEventListener("timeupdate", () => highlightWord());
 
 // Media keys, the desktop media widget and Firefox's own controls act on the <audio>
 // element directly; mirror that in the player state.
@@ -626,9 +776,9 @@ $("btn-font-down").addEventListener("click", () => setFontSize(state.fontSize - 
 $("btn-font-up").addEventListener("click", () => setFontSize(state.fontSize + 2));
 $("voice").addEventListener("change", (e) => setVoice(e.target.value));
 
-// Keep buttons from taking focus so Space always means play/pause.
+// Transport clicks keep the reading view focused; menu buttons retain native focus.
 document.addEventListener("mousedown", (e) => {
-  if (e.target.closest("button")) e.preventDefault();
+  if (e.target.closest("#controls button")) e.preventDefault();
 });
 
 const progress = $("progress");
@@ -659,8 +809,14 @@ window.addEventListener("resize", () => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && state.menu) {
+    e.preventDefault();
+    if (state.menu === "dict") closeDict();
+    else closeSettings();
+    return;
+  }
   if (/^(SELECT|INPUT|TEXTAREA)$/.test(e.target.tagName) || e.ctrlKey || e.altKey || e.metaKey) return;
-  if (dictOpen()) return;
+  if (state.menu || e.target.closest("button")) return;
   const handlers = {
     " ": togglePlay,
     k: togglePlay,
@@ -688,7 +844,11 @@ browser.runtime.onMessage.addListener((msg) => {
 // ---------------------------------------------------------------- start
 
 (async () => {
-  const saved = await browser.storage.local.get({ rate: 1, voice: "af_heart", fontSize: 20 });
+  const saved = await browser.storage.local.get({ rate: 1, voice: "af_heart", fontSize: 20, preferences: DEFAULT_PREFERENCES });
+  for (const key of Object.keys(DEFAULT_PREFERENCES)) {
+    if (typeof saved.preferences?.[key] === "boolean") state.preferences[key] = saved.preferences[key];
+  }
+  applyPreferences();
   state.voice = saved.voice;
   setRate(saved.rate);
   setFontSize(saved.fontSize);

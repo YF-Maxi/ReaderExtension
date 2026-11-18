@@ -1,48 +1,51 @@
 const PLAYER_URL = browser.runtime.getURL("player.html");
 let playerWindowId = null;
-let pending = null; // {text, title, url} waiting for a freshly opened player
+let pending = null; // {text, title, url, source} waiting for a freshly opened player
+let activeSource = null;
+let readRequest = 0;
 
 browser.menus.create({ id: "read-selection", title: "Read aloud", contexts: ["selection"] });
 browser.menus.create({ id: "read-page", title: "Read page aloud", contexts: ["page"] });
 
-// Runs in the page: the selection with line breaks kept (menus' selectionText flattens them),
-// including selections inside text fields.
-const GET_SELECTION = `(() => {
-  const el = document.activeElement;
-  if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT") &&
-      typeof el.selectionStart === "number" && el.selectionStart !== el.selectionEnd) {
-    return el.value.substring(el.selectionStart, el.selectionEnd);
-  }
-  const sel = window.getSelection();
-  return sel ? sel.toString() : "";
-})()`;
-
-const GET_PAGE = `(() => {
-  const root = document.querySelector("article") || document.querySelector("main") ||
-               document.querySelector("[role=main]") || document.body;
-  return root ? root.innerText : "";
-})()`;
-
-async function runInTab(tabId, code, allFrames) {
+async function captureTab(tabId, wholePage) {
   try {
-    const results = await browser.tabs.executeScript(tabId, { code, allFrames });
-    return results.filter((r) => typeof r === "string").sort((a, b) => b.length - a.length)[0] || "";
+    await browser.tabs.executeScript(tabId, { file: "page-reader.js", allFrames: !wholePage });
+    const results = await browser.tabs.executeScript(tabId, {
+      code: `globalThis.readerTTSPage.extract(${wholePage})`, allFrames: !wholePage,
+    });
+    return results.filter((r) => r?.text?.trim()).sort((a, b) => b.text.length - a.text.length)[0] || null;
   } catch (e) {
     // Privileged pages (about:, addons.mozilla.org, the PDF viewer, …) can't be scripted.
-    return "";
+    return null;
+  }
+}
+
+async function clearSource() {
+  const source = activeSource;
+  activeSource = null;
+  if (source) {
+    await browser.tabs.sendMessage(source.tabId, { type: "source-clear", sessionId: source.sessionId }).catch(() => {});
   }
 }
 
 async function read(tab, { selectionText = "", wholePage = false } = {}) {
-  let text = "";
+  const request = ++readRequest;
+  await clearSource();
+  let captured = null;
   if (!wholePage) {
-    text = (await runInTab(tab.id, GET_SELECTION, true)).trim() || selectionText.trim();
+    captured = await captureTab(tab.id, false);
   }
-  if (!text) text = (await runInTab(tab.id, GET_PAGE, false)).trim();
+  let text = captured?.text || selectionText.trim();
+  if (!text) {
+    captured = await captureTab(tab.id, true);
+    text = captured?.text || "";
+  }
   if (!text) {
     text = "Nothing to read. Select some text on the page first, then right-click and choose Read aloud.";
   }
-  await openPlayer({ text, title: tab.title || "", url: tab.url || "" });
+  if (request !== readRequest) return;
+  activeSource = captured?.sessionId ? { tabId: tab.id, sessionId: captured.sessionId } : null;
+  await openPlayer({ text, title: tab.title || "", url: tab.url || "", source: activeSource });
 }
 
 async function openPlayer(payload) {
@@ -68,7 +71,10 @@ async function openPlayer(payload) {
 }
 
 browser.windows.onRemoved.addListener((id) => {
-  if (id === playerWindowId) playerWindowId = null;
+  if (id === playerWindowId) {
+    playerWindowId = null;
+    clearSource();
+  }
 });
 
 browser.runtime.onMessage.addListener((msg) => {

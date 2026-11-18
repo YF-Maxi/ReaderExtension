@@ -9,30 +9,74 @@
   <header>
     <div id="title" title="">Reader</div>
     <div id="status"><span id="status-dot"></span><span id="status-text">Starting…</span></div>
-    <button id="btn-dict" title="Pronunciation dictionary">Pronunciations</button>
+    <nav aria-label="Reader menus">
+      <button id="btn-dict" aria-controls="dict" aria-expanded="false">Pronunciations</button>
+      <button id="btn-settings" aria-controls="preferences" aria-expanded="false">Settings</button>
+    </nav>
   </header>
 
   <main id="viewport" tabindex="-1">
     <div id="track"></div>
   </main>
 
-  <section id="dict" hidden>
-    <div class="dict-head">
-      <strong>Pronunciations</strong>
-      <span id="dict-path"></span>
-      <button id="dict-close" title="Close (Esc)" aria-label="Close">✕</button>
+  <section id="dict" class="menu-panel" aria-labelledby="dict-heading" hidden>
+    <div class="menu-head">
+      <button id="dict-close" class="back-button" title="Back to reader (Esc)">← Reader</button>
+      <h1 id="dict-heading">Pronunciations</h1>
     </div>
+    <p class="menu-note">Playback is paused. Your place is saved.</p>
+    <span id="dict-path"></span>
+    <label class="sr-only" for="dict-text">Pronunciation dictionary</label>
     <textarea id="dict-text" spellcheck="false" placeholder="case_sensitive:&#10;SOC=sock&#10;IoCs=/ˌIˌOsˈiz/&#10;&#10;case_insensitive:&#10;json=j-son"></textarea>
     <div class="dict-actions">
       <span class="hint"><code>word=respelling</code> · <code>word=/phonemes/</code> · <code># comment</code><br>under <code>case_sensitive:</code> or <code>case_insensitive:</code></span>
       <button id="dict-save" class="accent" title="Save (Ctrl+S)">Save</button>
     </div>
-    <div id="dict-msg"></div>
+    <div id="dict-msg" role="status"></div>
     <div class="dict-try">
+      <label class="sr-only" for="try-text">Test a word or sentence</label>
       <input id="try-text" placeholder="Try it: type a word or sentence, press Enter">
       <button id="try-btn">▶ Try</button>
     </div>
     <div id="try-out"></div>
+  </section>
+
+  <section id="preferences" class="menu-panel" aria-labelledby="settings-heading" hidden>
+    <div class="menu-head">
+      <button id="settings-close" class="back-button" title="Back to reader (Esc)">← Reader</button>
+      <h1 id="settings-heading">Settings</h1>
+    </div>
+    <p class="menu-note">Playback is paused. Changes are saved automatically.</p>
+
+    <fieldset>
+      <legend>Reader window</legend>
+      <label class="setting-toggle"><span>Highlight current word<small>Emphasize the sentence and word being read.</small></span><input id="pref-reader-highlight" type="checkbox"></label>
+      <label class="setting-toggle"><span>Auto-scroll<small>Keep the current sentence centered.</small></span><input id="pref-reader-scroll" type="checkbox"></label>
+      <div class="setting-control"><span>Text size</span><div class="font">
+        <button id="btn-font-down" aria-label="Smaller text">A−</button>
+        <output id="font-label">20 px</output>
+        <button id="btn-font-up" aria-label="Larger text">A+</button>
+      </div></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Original page</legend>
+      <label class="setting-toggle"><span>Highlight current word<small>Follow along on the page you started from.</small></span><input id="pref-page-highlight" type="checkbox"></label>
+      <label class="setting-toggle"><span>Auto-scroll<small>Bring the current word into view.</small></span><input id="pref-page-scroll" type="checkbox"></label>
+      <p id="source-note" class="menu-note" role="status"></p>
+    </fieldset>
+
+    <fieldset>
+      <legend>Playback</legend>
+      <label class="setting-toggle"><span>Start reading automatically<small>Play when you open a new selection or page.</small></span><input id="pref-autoplay" type="checkbox"></label>
+      <div class="setting-control"><span>Speed</span><div class="speed">
+        <button id="btn-slower" aria-label="Slower">−</button>
+        <button id="speed-label" title="Reset to 1×">1.0×</button>
+        <button id="btn-faster" aria-label="Faster">+</button>
+      </div></div>
+      <label class="setting-control" for="voice"><span>Voice</span><select id="voice"><option value="af_heart">Heart · loading voices…</option></select></label>
+    </fieldset>
+    <p class="menu-note">Auto-scroll gives you four seconds to browse after you scroll manually.</p>
   </section>
 
   <footer>
@@ -60,18 +104,7 @@
       </button>
     </div>
 
-    <div id="settings">
-      <div class="speed" title="Reading speed ( - / + )">
-        <button id="btn-slower" aria-label="Slower">−</button>
-        <button id="speed-label" title="Reset to 1×">1.0×</button>
-        <button id="btn-faster" aria-label="Faster">+</button>
-      </div>
-      <select id="voice" title="Voice" aria-label="Voice"></select>
-      <div class="font" title="Text size">
-        <button id="btn-font-down" aria-label="Smaller text">A−</button>
-        <button id="btn-font-up" aria-label="Larger text">A+</button>
-      </div>
-    </div>
+    <div class="playback-summary"><span id="playback-summary">1.0× · Heart</span><button id="btn-playback-settings" aria-controls="preferences">Adjust playback</button></div>
   </footer>
 
   <audio id="audio" preload="auto"></audio>

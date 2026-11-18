@@ -59,7 +59,19 @@ When you change the extension, bump `version` in `extension/manifest.json` and s
 | Jump anywhere | click a sentence, or drag the progress slider |
 | Media keys | play/pause, next/previous sentence, also from the desktop media widget |
 
-You can scroll the text yourself. The view returns to the current sentence after 4 seconds. Voice, speed, text size and window size are remembered. To change the keyboard shortcut, go to `about:addons` → ⚙ → *Manage Extension Shortcuts*.
+Click **Settings** in the reader header (or **Adjust playback** below the controls) to change:
+
+- **Reader window:** highlighting, auto-scroll and text size.
+- **Original page:** current-word highlighting and auto-scroll, independently of the reader window.
+- **Playback:** voice, speed and whether a new selection starts playing automatically.
+
+All settings and the window size are remembered. Highlighting is enabled in both views by default; page auto-scroll starts disabled. When auto-scroll is enabled, you can scroll manually and reading will follow again after four seconds. Page scrolling keeps the current word visible, including in scrollable reading panes.
+
+**Settings** and **Pronunciations** replace the reading view and hide the bottom player controls. Opening either menu pauses playback and preserves your place. Use **← Reader** or **Esc** to return, then press Play to continue. Switching away from unsaved pronunciation edits warns before discarding them.
+
+Page tracking works on ordinary web-page text, including selections and inline formatting, without changing the page's text or selection. Text fields and protected browser pages (such as Firefox's PDF viewer) cannot be highlighted. If the source tab navigates, closes, or replaces the tracked text, start reading from the page again to reconnect; the reader window can continue playing on its own.
+
+To change the keyboard shortcut, go to `about:addons` → ⚙ → *Manage Extension Shortcuts*.
 
 **Voices:** ★ marks the best-rated ones (Heart, Bella). There are 27 English voices (US and UK, female and male). Kokoro only speaks English well in this setup.
 
@@ -144,4 +156,9 @@ pronunciations.txt      your pronunciation dictionary
 server/tts_server.py    HTTP TTS server (Kokoro)
 native/                 native messaging host that launches the server
 extension/              Firefox extension (background, player window)
+tests/                  browser checks with a simulated voice server, background tests
 ```
+
+## Development checks
+
+Run `node --test tests/background.test.cjs` for background routing and cleanup checks. To check the player and page tracking, serve the project with `python3 -m http.server 8765 --bind 127.0.0.1` and open <http://127.0.0.1:8765/tests/browser.html>. The browser checks use a simulated extension API and voice server, so they don't need Kokoro or an installed extension; they leave the player preview open for visual inspection. Real Firefox extension permissions and audio synthesis still require an installed-extension check.

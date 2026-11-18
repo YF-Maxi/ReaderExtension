@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Reader TTS browser checks</title>
+<style>
+  body { font: 14px/1.5 system-ui; margin: 20px; background: #eee; color: #222; }
+  iframe { width: 560px; max-width: 100%; height: 640px; border: 1px solid #ccc; background: white; }
+  #results { white-space: pre-wrap; }
+  .previews { display: flex; gap: 20px; flex-wrap: wrap; }
+</style>
+<h1>Reader TTS browser checks</h1>
+<p>Uses a simulated voice server and extension API. No model or extension installation needed.</p>
+<p id="summary" role="status">Running…</p>
+<div class="previews"><iframe id="player" title="Reader preview"></iframe><iframe id="page" title="Source page preview"></iframe></div>
+<details><summary>Detailed check results</summary><pre id="results">Running…</pre></details>
+<script src="browser-tests.js"></script>
+</html>
